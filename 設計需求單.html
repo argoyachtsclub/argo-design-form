@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2026 亞果遊艇會設計-需求單</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <!-- 引入 html2pdf.js 函式庫 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    
+    <script>
+        // 設定 Google Apps Script 部署後的 Web App URL
+        const GAS_URL = "https://script.google.com/macros/s/AKfycbzihHgjjI6AovPJ-8EKH5k-kQ-LkWjkXQOrQu6wT2pm3QzvazsxotCO6DPGiwKVMGPh/exec";
+        const IS_MAINTENANCE = false;
+
+        // 計算 10 個工作天（14 天）之後的日期
+        function getMinDeadline() {
+            let date = new Date();
+            let count = 0;
+            while (count < 10) {
+                date.setDate(date.getDate() + 1);
+                if (date.getDay() !== 0 && date.getDay() !== 6) {
+                    count++;
+                }
+            }
+            return date;
+        }
+
+        const toBase64 = file => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = () => resolve(reader.result.split(',')[1]);
+            reader.onerror = error => reject(error);
+        });
+
+        const compressImage = (file) => new Promise((resolve) => {
+            if (!file.type.startsWith('image/')) return resolve(file);
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = (e) => {
+                const img = new Image();
+                img.src = e.target.result;
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    let width = img.width;
+                    let height = img.height;
+                    const MAX_SIZE = 1200;
+                    if (width > height) {
+                        if (width > MAX_SIZE) { height *= MAX_SIZE / width; width = MAX_SIZE; }
+                    } else {
+                        if (height > MAX_SIZE) { width *= MAX_SIZE / height; height = MAX_SIZE; }
+                    }
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+                    canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.8);
+                };
+            };
+        });
+
+        // 驗證日期：不可選假日，且需預留 14 天
+        window.validateDate = function() {
+            const dateInput = document.getElementById('deadline');
+            const selectedDate = new Date(dateInput.value);
+            const minDate = getMinDeadline();
+            minDate.setHours(0,0,0,0);
+            
+            if (dateInput.value) {
+                const day = selectedDate.getDay();
+                // 檢查是否為週六(6)或週日(0)
+                if (day === 0 || day === 6) {
+                    alert("⚠️ 為了確保設計品質，完成日期不能選擇週六或週日。");
+                    dateInput.value = "";
+                    return;
+                }
+                // 檢查是否符合 14 天預約期
+                if (selectedDate < minDate) {
+                    alert("⚠️ 設計需求需預留至少 14 天(兩週不含假日)之工作天。");
+                    dateInput.value = "";
+                    return;
+                }
+            }
+        };
+
+        // 提交表單資料至 GAS
+        window.handleSubmit = async function() {
+            const btn = document.getElementById('finalSubmit');
+            const fields = ['dept', 'applicant', 'ext', 'deadline', 'items', 'usage'];
+            let formData = {};
+            let firstErrorEl = null;
+
+            // 檢查必填欄位並跳轉
+            fields.forEach(id => {
+                const el = document.getElementById(id);
+                if (!el.value.trim()) { 
+                    el.classList.add('border-red-500', 'bg-red-50'); 
+                    if (!firstErrorEl) firstErrorEl = el;
+                } else { 
+                    el.classList.remove('border-red-500', 'bg-red-50'); 
+                    formData[id] = el.value.trim(); 
+                }
+            });
+
+            const textFileEl = document.getElementById('textFile');
+            const imgFileEl = document.getElementById('imgFile');
+
+            if (firstErrorEl) {
+                firstErrorEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                firstErrorEl.focus();
+                alert("⚠️ 請填寫完整所有必填欄位。");
+                return;
+            }
+
+            if (textFileEl.files.length === 0 || imgFileEl.files.length === 0) {
+                alert("⚠️ 請上傳文案及至少一張參考圖片。");
+                const uploadSection = document.getElementById('textName').parentElement;
+                uploadSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                return;
+            }
+
+            try {
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>處理中...';
+
+                const tFile = textFileEl.files[0];
+                formData.textFileName = tFile.name;
+                formData.textFileMime = tFile.type;
+                formData.textFileBody = await toBase64(tFile);
+
+                formData.images = [];
+                const imgFiles = Array.from(imgFileEl.files);
+                for (let i = 0; i < imgFiles.length; i++) {
+                    btn.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i>處理圖片 (${i+1}/${imgFiles.length})...`;
+                    const compressed = await compressImage(imgFiles[i]);
+                    const b64 = await toBase64(compressed);
+                    formData.images.push({
+                        mime: "image/jpeg",
+                        body: b64,
+                        name: imgFiles[i].name
+                    });
+                }
+
+                btn.innerHTML = '<i class="fas fa-paper-plane fa-spin mr-2"></i>同步至雲端系統...';
+                
+                const response = await fetch(GAS_URL, {
+                    method: 'POST',
+                    body: JSON.stringify(formData)
+                });
+
+                alert("✅ 提交完成！\n資料已自動歸類並發送 Email 通知。\n請檢查相關信箱。");
+                btn.innerHTML = '已完成送出';
+                btn.classList.replace('bg-[#002856]', 'bg-green-600');
+                setTimeout(() => location.reload(), 3000);
+
+            } catch (err) {
+                alert("❌ 送出失敗：" + err.message);
+                btn.disabled = false;
+                btn.innerHTML = '重新確認送出';
+            }
+        };
+
+        window.handleFileSelect = function(inputId, spanId) {
+            const input = document.getElementById(inputId);
+            const span = document.getElementById(spanId);
+            if (input.files.length > 0) {
+                span.innerText = input.files.length === 1 ? "已選: " + input.files[0].name : "已選 " + input.files.length + " 個檔案";
+                span.classList.add('text-green-600', 'font-bold');
+            }
+        };
+
+        // 下載 PDF 功能：優化版面
+        window.downloadPDF = function() {
+            const element = document.getElementById('pdfArea');
+            const applicant = document.getElementById('applicant').value || '未命名';
+            const date = new Date().toISOString().slice(0, 10);
+            
+            const btn = document.getElementById('btnDownload');
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>生成中...';
+            btn.disabled = true;
+
+            const opt = {
+                margin:       [0, 10, 10, 10], // 頂部邊距設為 0
+                filename:     `設計需求單_${applicant}_${date}.pdf`,
+                image:        { type: 'jpeg', quality: 0.98 },
+                html2canvas:  { 
+                    scale: 2, 
+                    useCORS: true, 
+                    letterRendering: true,
+                    scrollY: 0 
+                },
+                jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' },
+                pagebreak:    { mode: 'avoid-all' }
+            };
+
+            html2pdf().set(opt).from(element).save().then(() => {
+                btn.innerHTML = '<i class="fas fa-file-pdf mr-2"></i>下載 PDF 存檔';
+                btn.disabled = false;
+            }).catch(err => {
+                console.error(err);
+                btn.innerHTML = '<i class="fas fa-file-pdf mr-2"></i>下載 PDF 存檔';
+                btn.disabled = false;
+            });
+        };
+
+        window.onload = function() {
+            if (IS_MAINTENANCE) {
+                document.getElementById('formContainer').classList.add('hidden');
+                document.getElementById('maintenanceMsg').classList.remove('hidden');
+                return;
+            }
+            document.getElementById('todayDate').value = new Date().toLocaleDateString('zh-TW');
+            const minDate = getMinDeadline();
+            const yyyy = minDate.getFullYear();
+            const mm = String(minDate.getMonth() + 1).padStart(2, '0');
+            const dd = String(minDate.getDate()).padStart(2, '0');
+            document.getElementById('deadline').setAttribute('min', `${yyyy}-${mm}-${dd}`);
+        };
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; background-color: #f8fafc; margin: 0; padding: 0; scroll-behavior: smooth; }
+        .upload-card { border: 2px dashed #cbd5e1; transition: 0.3s; cursor: pointer; }
+        .upload-card:hover { border-color: #B69A7D; background-color: #fffaf5; }
+        
+        .flow-step-box { background: white; border: 1px solid #e2e8f0; border-radius: 0.75rem; padding: 0.75rem; position: relative; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+        .flow-connector { width: 2px; height: 16px; background: #cbd5e1; margin: 0 auto; }
+        .flow-label { font-size: 8px; color: #B69A7D; width: 60px; text-align: center; line-height: 1.2; font-weight: bold; flex-shrink: 0; }
+        
+        .text-argo-brown { color: #B69A7D; }
+        .bg-argo-warm { background-color: #FDF9F3; }
+        .border-argo-brown { border-color: #B69A7D; }
+        
+        .notice-badge {
+            background-color: #FFF1F2;
+            border: 1.5px solid #E11D48;
+            color: #BE123C;
+            border-radius: 6px;
+            padding: 6px 14px;
+            font-weight: 900;
+            display: inline-flex;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(225, 29, 72, 0.05);
+        }
+
+        .flow-text { font-weight: 700; font-size: 0.75rem; color: #002856; }
+
+        /* PDF 生成專用：確保內容緊貼頂部 */
+        #pdfArea {
+            margin-top: 0 !important;
+            padding-top: 0 !important;
+        }
+
+        /* 讓輸入框被聚焦時有更明顯的效果 */
+        input:focus, textarea:focus, select:focus {
+            border-color: #B69A7D;
+            box-shadow: 0 0 0 2px rgba(182, 154, 125, 0.2);
+        }
+    </style>
+</head>
+<body class="min-h-screen">
+    
+    <!-- 網頁頁首 (PDF 下載時自動忽略) -->
+    <header class="bg-[#002856] text-white p-4 shadow-lg border-b-4 border-[#B69A7D] data-html2canvas-ignore">
+        <div class="max-w-4xl mx-auto flex items-center space-x-4">
+            <i class="fas fa-anchor text-[#B69A7D] text-2xl"></i>
+            <div>
+                <h1 class="text-lg font-bold tracking-widest uppercase">ARGO YACHT CLUB</h1>
+                <p class="text-[8px] text-[#B69A7D] font-medium tracking-[0.2em] uppercase opacity-80">Design Request System</p>
+            </div>
+        </div>
+    </header>
+
+    <div class="py-2 md:py-6">
+        <main class="max-w-4xl mx-auto px-6">
+            
+            <!-- PDF 生成區域 -->
+            <div id="pdfArea" class="bg-white p-0">
+                
+                <!-- 申請單卡片 -->
+                <div class="rounded-2xl border border-slate-100 p-6 space-y-6 mb-6">
+                    <div class="text-center border-b pb-4">
+                        <h2 class="text-xl font-bold text-[#002856]">設計需求申請單</h2>
+                        <p class="text-[9px] text-[#B69A7D] font-bold uppercase tracking-widest mt-0.5">Design Request Form</p>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="space-y-1">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase">委託部門</label>
+                            <select id="dept" class="w-full rounded-lg p-2 border border-slate-200 bg-white text-xs outline-none transition-colors">
+                                <option>行銷部 Marketing</option>
+                                <option>業務部 Sales</option>
+                                <option>會員服務部 Membership</option>
+                                <option>亞果薈 Fine Dining</option>
+                                <option>維護課 Maintenance</option>
+                                <option>住服部 Service</option>
+                                <option>碼頭部 Marina</option>
+                            </select>
+                        </div>
+                        <div class="space-y-1">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase">* 申請人</label>
+                            <input type="text" id="applicant" class="w-full rounded-lg p-2 border border-slate-200 text-xs outline-none transition-colors">
+                        </div>
+                        <div class="space-y-1">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase">* 聯絡分機</label>
+                            <input type="text" id="ext" class="w-full rounded-lg p-2 border border-slate-200 text-xs outline-none transition-colors" placeholder="#123">
+                        </div>
+                        <div class="space-y-1">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase">* 完成日期</label>
+                            <input type="date" id="deadline" onchange="validateDate()" class="w-full rounded-lg p-2 border border-slate-200 text-xs outline-none transition-colors">
+                        </div>
+                    </div>
+
+                    <div class="space-y-1">
+                        <label class="block text-[10px] font-bold text-slate-400 uppercase">* 需求項目詳述</label>
+                        <textarea id="items" rows="4" class="w-full rounded-lg p-2 border border-slate-200 text-xs outline-none transition-colors" placeholder="請詳細輸入設計規格、尺寸、細節內容..."></textarea>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="space-y-1">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase">* 使用用途</label>
+                            <input type="text" id="usage" class="w-full rounded-lg p-2 border border-slate-200 text-xs outline-none transition-colors" placeholder="例：活動背板、社群貼文">
+                        </div>
+                        <div class="space-y-1">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase">填表日期</label>
+                            <input type="text" id="todayDate" readonly class="w-full bg-slate-50 rounded-lg p-2 border-none text-slate-400 text-xs">
+                        </div>
+                    </div>
+
+                    <!-- 檔案上傳控制項 (PDF 中隱藏) -->
+                    <div class="grid grid-cols-2 gap-4 data-html2canvas-ignore">
+                        <div class="upload-card rounded-xl p-3 text-center" onclick="document.getElementById('textFile').click()">
+                            <i class="fas fa-file-alt text-[#002856] text-lg mb-1"></i>
+                            <p class="text-[10px] font-bold">文案上傳 (單檔)</p>
+                            <input type="file" id="textFile" class="hidden" onchange="handleFileSelect('textFile', 'textName')">
+                            <p id="textName" class="text-[9px] text-slate-400">Word / PDF</p>
+                        </div>
+                        <div class="upload-card rounded-xl p-3 text-center" onclick="document.getElementById('imgFile').click()">
+                            <i class="fas fa-images text-[#B69A7D] text-lg mb-1"></i>
+                            <p class="text-[10px] font-bold">參考圖上傳</p>
+                            <input type="file" id="imgFile" class="hidden" multiple accept="image/*" onchange="handleFileSelect('imgFile', 'imgName')">
+                            <p id="imgName" class="text-[9px] text-slate-400">可多選圖片</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 備註與簽核區 -->
+                <div class="bg-argo-warm border-l-8 border-argo-brown rounded-r-xl shadow-md overflow-hidden border border-[#E6D5C3]">
+                    <div class="p-6">
+                        <div class="flex items-start">
+                            <div class="bg-argo-brown rounded-full p-2 mr-4 mt-1">
+                                <i class="fas fa-info text-white text-xs"></i>
+                            </div>
+                            <div class="space-y-4 w-full">
+                                <div class="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                                    <h4 class="text-base font-black text-argo-brown tracking-widest">設計需求注意事項</h4>
+                                    <div class="notice-badge">
+                                        <i class="fas fa-print mr-2 text-sm"></i>
+                                        <span class="text-xs tracking-tight">＊請印出紙本簽核後送至行銷部</span>
+                                    </div>
+                                </div>
+                                
+                                <div class="w-full">
+                                    <ol class="text-xs text-[#8C7355] leading-relaxed list-decimal list-inside space-y-1 font-bold">
+                                        <li>設計需求預留至少 <span class="text-argo-brown border-b border-argo-brown">14 天</span>(不含假日)之工作天。</li>
+                                        <li>天數計算皆不含例假日。</li>
+                                        <li>行銷部僅執行“設計”及協助看樣本材質對色，不協助簽呈、發包、請購、驗收等流程。</li>
+                                        <li>特殊急件請與行銷主管先行聯繫。</li>
+                                        <li>每項設計調整以兩次為上限。</li>
+                                    </ol>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="p-8 pt-0 bg-white/40">
+                        <div class="flex justify-between items-center space-x-16 mt-10">
+                            <div class="flex-1 text-center">
+                                <p class="text-[10px] font-black text-[#A69177] uppercase mb-16 tracking-widest">申請人簽名 (Applicant)</p>
+                                <div class="border-b-2 border-dashed border-[#D4C3B0] w-full"></div>
+                            </div>
+                            <div class="flex-1 text-center">
+                                <p class="text-[10px] font-black text-[#002856] uppercase mb-16 tracking-widest">主管核准簽核 (Approval)</p>
+                                <div class="border-b-4 border-[#002856] w-full"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 操作按鈕 (PDF 中隱藏) -->
+            <div id="buttonGroup" class="flex flex-col md:flex-row space-y-4 md:space-y-0 md:space-x-4 mt-8 data-html2canvas-ignore">
+                <button type="button" id="btnDownload" onclick="downloadPDF()" class="flex-1 border-2 border-[#B69A7D] text-[#B69A7D] font-bold py-3 rounded-xl hover:bg-[#fffaf5] transition-all flex items-center justify-center cursor-pointer shadow-sm">
+                    <i class="fas fa-file-pdf mr-2 text-lg"></i> 下載 PDF 簽核單
+                </button>
+                <button type="button" id="finalSubmit" onclick="handleSubmit()" class="flex-1 bg-[#002856] text-white font-bold py-3 rounded-xl shadow-lg hover:bg-blue-900 transition-all tracking-widest uppercase cursor-pointer">
+                    確認內容並同步送出
+                </button>
+            </div>
+
+            <!-- 工作流程圖 (僅供參考) -->
+            <section class="mt-20 mb-12 data-html2canvas-ignore border-t-2 border-dashed border-slate-200 pt-10">
+                <div class="text-center mb-10">
+                    <h3 class="text-lg font-black text-argo-brown tracking-tighter">設計工作流程圖</h3>
+                    <p class="text-[10px] text-argo-brown uppercase tracking-widest mt-1 font-bold">Argo Design Workflow</p>
+                </div>
+                
+                <div class="max-w-3xl mx-auto space-y-0 flex flex-col items-center">
+                    <div class="flow-step-box w-full max-w-lg text-center border-l-4 border-l-[#002856]">
+                        <p class="flow-text">需求單位提出設計需求單 <br><span class="text-[#B69A7D] mt-1 block font-black">★ 請務必完成單位主管簽核 ★</span></p>
+                    </div>
+                    <div class="flow-connector"></div>
+                    
+                    <div class="flow-step-box w-full max-w-lg flex items-center justify-between px-6">
+                        <span class="flow-label">1-2天</span>
+                        <p class="flow-text flex-1 text-center">設計課收到簽核需求單</p>
+                        <div class="w-[60px] flex-shrink-0"></div>
+                    </div>
+                    <div class="flow-connector"></div>
+
+                    <div class="w-full flex items-start max-w-3xl">
+                        <div class="w-1/2 flex flex-col items-center">
+                            <div class="flow-step-box border-[#B69A7D] bg-argo-warm text-center w-5/6 shadow-md">
+                                <span class="text-[9px] font-black text-argo-brown uppercase block mb-1">正常件</span>
+                                <p class="flow-text" style="color: #B69A7D;">確認進單</p>
+                                <p class="text-[9px] text-argo-brown mt-1">1-2天</p>
+                            </div>
+                        </div>
+                        <div class="w-1/2 flex flex-col items-center">
+                            <div class="flow-step-box border-red-200 bg-red-50 text-center w-5/6 opacity-80">
+                                <span class="text-[9px] font-black text-red-600 uppercase block mb-1">退件</span>
+                                <p class="flow-text text-red-700 text-center">設計課無法執行<br>(行銷部主管說明無法執行之緣由)</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="w-full flex max-w-3xl">
+                        <div class="w-1/2 flex justify-center">
+                            <div class="flow-connector"></div>
+                        </div>
+                        <div class="w-1/2"></div>
+                    </div>
+
+                    <div class="flow-step-box w-full max-w-lg flex items-center justify-between px-6">
+                        <span class="flow-label">2-3天</span>
+                        <p class="flow-text flex-1 text-center">整合資料與發想</p>
+                        <div class="w-[60px] flex-shrink-0"></div>
+                    </div>
+                    <div class="flow-connector"></div>
+
+                    <div class="flow-step-box w-full max-w-lg flex flex-col items-center justify-center px-6 bg-argo-warm/50">
+                        <div class="flex items-center w-full">
+                            <div class="flow-label">4-5天</div>
+                            <p class="flow-text text-center flex-1">雙方確認方向無誤，進入設計發想</p>
+                            <div class="w-[60px] flex-shrink-0"></div>
+                        </div>
+                        <p class="text-[9px] text-center font-bold mt-1 text-gray-400">（依需求單位回覆速度為主）</p>
+                    </div>
+                    <div class="flow-connector"></div>
+
+                    <div class="flow-step-box w-full max-w-lg flex items-center justify-between px-6 bg-slate-50">
+                        <div class="flow-label">2-3天</div>
+                        <p class="flow-text flex-1 text-center">設計製作與完稿</p>
+                        <div class="w-[60px] flex-shrink-0"></div>
+                    </div>
+                    <div class="flow-connector"></div>
+
+                    <div class="flow-step-box w-full max-w-lg flex flex-col items-center justify-center px-6 border-b-4 border-b-[#B69A7D]">
+                        <div class="flex items-center w-full">
+                            <span class="flow-label">完稿</span>
+                            <p class="flow-text text-[#002856] text-center flex-1">設計交付</p>
+                            <div class="w-[60px] flex-shrink-0"></div>
+                        </div>
+                        <p class="text-[9px] text-gray-400 text-center font-bold leading-tight mt-1">
+                            （後續調整以兩次為上限，調整約需 4-5 工作天）
+                        </p>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <footer class="text-center text-slate-400 text-[8px] pb-10 data-html2canvas-ignore">
+        © 2026 ARGO YACHT CLUB. ALL RIGHTS RESERVED.
+    </footer>
+</body>
+</html>
